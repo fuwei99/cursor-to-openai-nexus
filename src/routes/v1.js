@@ -611,25 +611,13 @@ router.post('/chat/completions', async (req, res) => {
         let hasWrittenThinkingEnd = false; // 标记是否已发送thinking结束标签
         let hasWrittenContent = false; // 标记是否已发送content
         let accumulatedThinking = ''; // 累积thinking内容
-        let accumulatedContent = ''; // 累积content内容
-        
-        // 确保 stopSequences 是一个数组
+
         const effectiveStopSequences = Array.isArray(stopSequences) ? stopSequences : (stopSequences ? [stopSequences] : []);
-        let currentOutputStreamContent = ''; // 用于检测停止字符串
 
         for await (const chunk of response.body) {
-          // 如果响应已结束，不再处理后续数据
-          if (responseEnded) {
-            continue;
-          }
-          
-          // 如果请求被中止，则停止处理
-          if (abortController.signal.aborted) {
-            logger.info('检测到请求中止信号，停止处理流数据块。');
-            if (!res.writableEnded) {
-                res.end();
-            }
-            break; 
+          if (responseEnded || abortController.signal.aborted) {
+            if (!res.writableEnded) res.end();
+            break;
           }
 
           let result = {};
@@ -637,276 +625,135 @@ router.post('/chat/completions', async (req, res) => {
             result = chunkToUtf8String(chunk);
           } catch (error) {
             logger.error('解析响应块失败:', error);
-            // 提供默认的空结果，避免后续处理出错
-            result = {
-              isThink: false, 
-              thinkingContent: '', 
-              content: '',
-              error: `解析错误: ${error.message}`
-            };
+            result = { isThink: false, thinkingContent: '', content: '', error: `解析错误: ${error.message}` };
           }
-          
-          // 检查是否返回了错误对象
+
           if (result && typeof result === 'object' && result.error) {
-            // 检查是否包含特定的无效cookie错误信息
-            const errorStr = typeof result.error === 'string' ? result.error : JSON.stringify(result.error);
-            
-            // 处理错误并获取结果
-            const errorResult = handleCursorError(errorStr, bearerToken, originalAuthToken);
-            
-            // 如果是需要移除的cookie，从API Key中移除
+            const errorResult = handleCursorError(typeof result.error === 'string' ? result.error : JSON.stringify(result.error), bearerToken, originalAuthToken);
             if (errorResult.shouldRemoveCookie) {
               const removed = keyManager.removeCookieFromApiKey(bearerToken, originalAuthToken);
               logger.info(`Cookie移除${removed ? '成功' : '失败'}`);
-              
-              // 如果成功移除，在错误消息中添加明确提示
-              if (removed) {
-                errorResult.message = `⚠️ 目前Cookie已从API Key中移除 ⚠️\n\n${errorResult.message}`;
-              }
+              if (removed) errorResult.message = `⚠️ 目前Cookie已从API Key中移除 ⚠️\n\n${errorResult.message}`;
             }
-            
-            // 返回错误信息给客户端，作为assistant消息
             res.write(
               `data: ${JSON.stringify({
-                id: responseId,
-                object: 'chat.completion.chunk',
-                created: Math.floor(Date.now() / 1000),
-                model: req.body.model,
-                choices: [
-                  {
-                    index: 0,
-                    delta: {
-                      content: errorResult.message,
-                    },
-                  },
-                ],
-              })}\n\n`
-            );
-            
-            res.write('data: [DONE]\n\n');
-            responseEnded = true; // 标记响应已结束
-            if (!res.writableEnded) {
-              res.end();
-            }
-            break; // 跳出循环，不再处理后续数据
-          }
-
-          let contentToProcess = '';
-          if (result.isThink && result.thinkingContent && result.thinkingContent.length > 0) {
-            contentToProcess += result.thinkingContent;
-          }
-          if (result.content && result.content.length > 0) {
-            contentToProcess += result.content;
-          }
-
-          if (contentToProcess.length > 0) {
-            currentOutputStreamContent += contentToProcess;
-            let stopDetected = false;
-            let stopSequenceFound = null;
-
-            if (effectiveStopSequences.length > 0) {
-              for (const stopString of effectiveStopSequences) {
-                if (currentOutputStreamContent.includes(stopString)) {
-                  stopDetected = true;
-                  stopSequenceFound = stopString;
-                  // 截断到停止字符串第一次出现的地方
-                  contentToProcess = currentOutputStreamContent.substring(0, currentOutputStreamContent.indexOf(stopString) + stopString.length);
-                  // 更新 currentOutputStreamContent 为已处理并发送的部分
-                  currentOutputStreamContent = contentToProcess;
-                  break;
-                }
-              }
-            }
-            
-            // 发送处理后的内容 (可能是截断的，或者原始的)
-            // 需要根据 result.isThink 和 result.content 的原始结构来发送，而不是合并后的 contentToProcess
-            // 这里简化处理：如果检测到stop，我们将只发送到stop之前的部分，并且不再关心isThink
-
-            if (stopDetected) {
-                // 发送截断前的内容
-                // 重新构造 delta，只包含到停止字符串为止的内容
-                // 注意：这里的处理方式是假设停止字符串主要出现在 content 中，而不是 thinkingContent
-                // 如果 thinkingContent 和 content 都存在，且停止符跨越两者，则此逻辑需要更复杂
-
-                let finalChunkContent = currentOutputStreamContent;
-                let sentThinkingStartForStop = false;
-                let sentThinkingEndForStop = false;
-
-                // 如果 thinking 标签已开启但未关闭，且内容中包含 thinking 内容，先输出 thinking 内容
-                if (hasWrittenThinkingStart && !hasWrittenThinkingEnd && accumulatedThinking.length > 0 && finalChunkContent.startsWith(accumulatedThinking)) {
-                    // This case is complex if stop string is within thinking. For now, assume stop is in main content.
-                }
-
-                // 如果有思考标签已打开，先关闭它（如果内容不是思考内容）
-                if (hasWrittenThinkingStart && !hasWrittenThinkingEnd && !result.isThink && finalChunkContent.length > 0) {
-                    res.write(
-                        `data: ${JSON.stringify({
-                          id: responseId,
-                          object: 'chat.completion.chunk',
-                          created: Math.floor(Date.now() / 1000),
-                          model: req.body.model,
-                          choices: [
-                            {
-                              index: 0,
-                              delta: {
-                                content: "\n</think>\n",
-                              },
-                            },
-                          ],
-                        })}
+                id: responseId, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model: req.body.model,
+                choices: [{ index: 0, delta: { content: errorResult.message } }],
+              })}
 
 `
-                      );
-                      hasWrittenThinkingEnd = true; // 标记已关闭
-                }
+            );
+            res.write('data: [DONE]\n\n');
+            responseEnded = true;
+            if (!res.writableEnded) res.end();
+            abortController.abort();
+            break;
+          }
 
-                // 发送停止字符串之前的部分
+          if (result.isThink && result.thinkingContent && result.thinkingContent.length > 0) {
+            let thinkingSegment = result.thinkingContent;
+            let stopDetectedHere = false;
+
+            for (const stopString of effectiveStopSequences) {
+              const stopIndex = thinkingSegment.indexOf(stopString);
+              if (stopIndex !== -1) {
+                thinkingSegment = thinkingSegment.substring(0, stopIndex + stopString.length);
+                stopDetectedHere = true;
+                logger.info(`检测到停止字符串 "${stopString}" 于思考内容中。将发送此前内容并终止。`);
+                break;
+              }
+            }
+
+            if (thinkingSegment.length > 0) {
+              if (!hasWrittenThinkingStart) {
                 res.write(
                   `data: ${JSON.stringify({
-                    id: responseId,
-                    object: 'chat.completion.chunk',
-                    created: Math.floor(Date.now() / 1000),
-                    model: req.body.model,
-                    choices: [
-                      {
-                        index: 0,
-                        delta: {
-                          // content: contentToProcess, // 使用截断后的 currentOutputStreamContent
-                          content: finalChunkContent,
-                        },
-                      },
-                    ],
+                    id: responseId, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model: req.body.model,
+                    choices: [{ index: 0, delta: { content: "<think>\n" } }],
                   })}
 
 `
                 );
-                logger.info(`检测到停止字符串 "${stopSequenceFound}"，已发送此前内容并终止响应。`);
-                abortController.abort(); // 中止对Cursor API的进一步请求
-                responseEnded = true;
-                if (!res.writableEnded) {
-                  res.end(); // 立即结束响应，不发送 [DONE]
-                }
-                break; // 跳出循环
-            }
-
-            // 未检测到停止字符串，正常处理
-            // 处理thinking内容
-            if (result.isThink && result.thinkingContent && result.thinkingContent.length > 0) {
-              // 累积thinking内容 (如果之前重置了 currentOutputStreamContent，这里需要重新累积)
-              // accumulatedThinking += result.thinkingContent; // accumulatedThinking 用于确保think标签正确闭合
-              
-              // 如果没有发送thinking开始标记，则发送
-              if (!hasWrittenThinkingStart) {
-                res.write(
-                  `data: ${JSON.stringify({
-                    id: responseId,
-                    object: 'chat.completion.chunk',
-                    created: Math.floor(Date.now() / 1000),
-                    model: req.body.model,
-                    choices: [
-                      {
-                        index: 0,
-                        delta: {
-                          content: "<think>\n",
-                        },
-                      },
-                    ],
-                  })}\n\n`
-                );
                 hasWrittenThinkingStart = true;
               }
-              
-              // 发送accumulated thinking内容片段
               res.write(
                 `data: ${JSON.stringify({
-                  id: responseId,
-                  object: 'chat.completion.chunk',
-                  created: Math.floor(Date.now() / 1000),
-                  model: req.body.model,
-                  choices: [
-                    {
-                      index: 0,
-                      delta: {
-                        content: result.thinkingContent,
-                      },
-                    },
-                  ],
-                })}\n\n`
+                  id: responseId, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model: req.body.model,
+                  choices: [{ index: 0, delta: { content: thinkingSegment } }],
+                })}
+
+`
               );
+              accumulatedThinking += thinkingSegment;
             }
 
-            // 处理常规内容
-            if (result.content && result.content.length > 0) {
-              // 累积content内容
-              // accumulatedContent += result.content; // 不再需要全局累积，由 currentOutputStreamContent 处理停止字符串
-              
-              // 如果已经有thinking内容，且尚未发送thinking结束标记，则发送
+            if (stopDetectedHere) {
+              abortController.abort();
+              responseEnded = true;
+              if (!res.writableEnded) res.end();
+              break;
+            }
+          }
+
+          if (result.content && result.content.length > 0) {
+            let contentSegment = result.content;
+            let stopDetectedHere = false;
+
+            for (const stopString of effectiveStopSequences) {
+              const stopIndex = contentSegment.indexOf(stopString);
+              if (stopIndex !== -1) {
+                contentSegment = contentSegment.substring(0, stopIndex + stopString.length);
+                stopDetectedHere = true;
+                logger.info(`检测到停止字符串 "${stopString}" 于常规内容中。将发送此前内容并终止。`);
+                break;
+              }
+            }
+            
+            if (contentSegment.length > 0) {
               if (hasWrittenThinkingStart && !hasWrittenThinkingEnd) {
-                res.write(
+                 res.write(
                   `data: ${JSON.stringify({
-                    id: responseId,
-                    object: 'chat.completion.chunk',
-                    created: Math.floor(Date.now() / 1000),
-                    model: req.body.model,
-                    choices: [
-                      {
-                        index: 0,
-                        delta: {
-                          content: "\n</think>\n",
-                        },
-                      },
-                    ],
-                  })}\n\n`
+                    id: responseId, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model: req.body.model,
+                    choices: [{ index: 0, delta: { content: "\n</think>\n" } }],
+                  })}
+
+`
                 );
                 hasWrittenThinkingEnd = true;
               }
-
-              // 发送content内容
               res.write(
                 `data: ${JSON.stringify({
-                  id: responseId,
-                  object: 'chat.completion.chunk',
-                  created: Math.floor(Date.now() / 1000),
-                  model: req.body.model,
-                  choices: [
-                    {
-                      index: 0,
-                      delta: {
-                        content: result.content,
-                      },
-                    },
-                  ],
-                })}\n\n`
+                  id: responseId, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model: req.body.model,
+                  choices: [{ index: 0, delta: { content: contentSegment } }],
+                })}
+
+`
               );
               hasWrittenContent = true;
             }
+
+            if (stopDetectedHere) {
+              abortController.abort();
+              responseEnded = true;
+              if (!res.writableEnded) res.end();
+              break;
+            }
           }
-        }
+        } 
         
-        // 处理结束逻辑：确保thinking标签被正确关闭
         if (!responseEnded) {
-          // 如果有thinking内容但没有发送结束标记，则发送
           if (hasWrittenThinkingStart && !hasWrittenThinkingEnd) {
             res.write(
               `data: ${JSON.stringify({
-                id: responseId,
-                object: 'chat.completion.chunk',
-                created: Math.floor(Date.now() / 1000),
-                model: req.body.model,
-                choices: [
-                  {
-                    index: 0,
-                    delta: {
-                      content: "\n</think>\n",
-                    },
-                  },
-                ],
-              })}\n\n`
+                id: responseId, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model: req.body.model,
+                choices: [{ index: 0, delta: { content: "\n</think>\n" } }],
+              })}
+
+`
             );
           }
-          
           res.write('data: [DONE]\n\n');
-          res.end();
+          if (!res.writableEnded) res.end();
         }
       } catch (streamError) {
         if (streamError.name === 'AbortError') {
