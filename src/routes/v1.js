@@ -593,15 +593,6 @@ router.post('/chat/completions', async (req, res) => {
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
 
-      // 监听客户端断开连接事件
-      req.on('close', () => {
-        if (!responseEnded) { // 仅当响应尚未正常结束时才中止
-          logger.warn('客户端已断开连接，正在中止对Cursor服务端的请求...');
-          controller.abort(); // 使用 AbortController 中止 fetch 请求
-          responseEnded = true; // 标记响应已因客户端断开而结束
-        }
-      });
-
       const responseId = `chatcmpl-${uuidv4()}`;
       
       let isThinking_status = 0; //0为没有思考，1为处于思考状态
