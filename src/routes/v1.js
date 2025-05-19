@@ -13,6 +13,8 @@ const config = require('../config/config');
 const crypto = require('crypto');
 const logger = require('../utils/logger');
 
+const activeRequestControllers = new Map(); // 用于存储 API Key -> AbortController 的映射
+
 // 存储刷新状态的变量
 let refreshStatus = {
   isRunning: false,
@@ -396,7 +398,6 @@ router.post('/chat/completions', async (req, res) => {
 
   try {
     const { model, messages, stream = false } = req.body;
-    // 处理停止字符串，用于流式传输中终止输出
     const stopTokens = Array.isArray(req.body.stop) ? req.body.stop : 
                       (typeof req.body.stop === 'string' ? [req.body.stop] : []);
     let bearerToken = req.headers.authorization?.replace('Bearer ', '');
@@ -589,9 +590,41 @@ router.post('/chat/completions', async (req, res) => {
 
     // 处理响应
     if (stream) {
+      // 如果存在此 API Key 的旧请求，则中止它
+      if (bearerToken && activeRequestControllers.has(bearerToken)) {
+        const oldController = activeRequestControllers.get(bearerToken);
+        logger.info(`API Key [${bearerToken}] 的新流式请求到达，正在中止旧请求...`);
+        oldController.abort();
+        // activeRequestControllers.delete(bearerToken); // 旧的会被新的覆盖，或在旧请求的清理逻辑中移除
+      }
+      // 存储当前请求的 AbortController
+      if (bearerToken) {
+        activeRequestControllers.set(bearerToken, controller);
+      }
+
+      // 清理当前请求的 AbortController 的辅助函数
+      const cleanupCurrentController = () => {
+        if (bearerToken && activeRequestControllers.get(bearerToken) === controller) {
+          activeRequestControllers.delete(bearerToken);
+          logger.debug(`API Key [${bearerToken}] 的流式请求处理完毕，已清理 AbortController。`);
+        }
+      };
+      res.on('finish', cleanupCurrentController); // 响应正常结束时清理
+      res.on('close', cleanupCurrentController);  // 响应因任何原因关闭时清理 (包括客户端断开)
+
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
+
+      // 监听客户端断开连接事件
+      req.on('close', () => {
+        if (!responseEnded) { 
+          logger.warn(`客户端已断开连接 (API Key: [${bearerToken}]), 正在中止对Cursor服务端的请求...`);
+          controller.abort(); 
+          responseEnded = true; 
+          // cleanupCurrentController 会在 res 'close' 时被调用
+        }
+      });
 
       const responseId = `chatcmpl-${uuidv4()}`;
       
@@ -787,14 +820,13 @@ router.post('/chat/completions', async (req, res) => {
               res.end();
               responseEnded = true;
               
-              // 中止与Cursor的请求连接
               try {
                 controller.abort();
-                logger.debug('检测到停止字符串，已中止与Cursor的连接以节省token');
+                logger.debug(`检测到停止字符串 (API Key: [${bearerToken}]), 已中止与Cursor的连接。`);
               } catch (abortError) {
-                logger.error('中止Cursor连接时出错:', abortError);
+                logger.error('中止Cursor连接时出错 (停止字符串):', abortError);
               }
-              
+              // cleanupCurrentController 会在 res 'finish' 或 'close' 时被调用
               break;
             }
           }
@@ -824,20 +856,26 @@ router.post('/chat/completions', async (req, res) => {
           
           res.write('data: [DONE]\n\n');
           res.end();
+          // cleanupCurrentController 会在 res 'finish' 时被调用
         }
       } catch (streamError) {
         // 区分正常的中止操作和真正的错误
         if (streamError.name === 'AbortError') {
-          logger.info('流处理被正常中止（停止字符串触发）');
+          logger.info(`流处理被中止 (API Key: [${bearerToken}]), 原因可能为: 新请求覆盖, 客户端断开, 或停止字符串触发。`);
         } else {
-          logger.error('Stream error:', streamError);
+          logger.error(`Stream error (API Key: [${bearerToken}]):`, streamError);
         }
         
-        // 确保在发送错误信息前检查响应是否已结束
         if (!res.writableEnded) {
           if (streamError.name === 'AbortError') {
-            // 这是由停止字符串触发的正常中止，已经处理过响应，不需要额外操作
-            return;
+            // AbortError 通常意味着我们主动中止，响应可能已处理或将由 'close' 事件处理
+            // 但为确保万无一失，如果响应未结束，尝试结束它
+            if (!res.headersSent) { // 避免在已发送头后再次发送
+                res.status(500).json({ error: 'Stream aborted' });
+            } else {
+                res.end(); //尝试结束流
+            }
+            return; // AbortError 处理完毕
           } else if (streamError.name === 'TimeoutError') {
             // 将超时错误作为assistant消息发送
             const errorMessage = `⚠️ 请求超时 ⚠️\n\n错误：服务器响应超时，请稍后重试。`;
