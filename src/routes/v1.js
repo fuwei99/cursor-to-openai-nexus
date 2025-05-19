@@ -398,10 +398,15 @@ router.post('/chat/completions', async (req, res) => {
 
   const abortController = new AbortController();
   res.on('close', () => {
-    // 检查res.writableEnded，确保只在连接实际断开且响应未结束时记录和中止
-    if (!res.writableEnded) {
-      logger.warn('客户端连接已关闭，中止对Cursor API的请求。');
+    // Log the state when 'close' event fires
+    logger.info(`RES_CLOSE_EVENT: Event fired. res.writableEnded: ${res.writableEnded}, signal.aborted (before this handler): ${abortController.signal.aborted}`);
+    
+    // If the abortController for this request hasn't been signaled yet, and the client connection closes, abort upstream.
+    if (!abortController.signal.aborted) { 
+      logger.warn('RES_CLOSE_EVENT: Client connection closed and upstream not yet aborted. Aborting upstream request now.');
       abortController.abort();
+    } else {
+      logger.info('RES_CLOSE_EVENT: Client connection closed, but upstream request was already aborted or completed. No new action taken.');
     }
   });
 
