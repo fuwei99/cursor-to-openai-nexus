@@ -398,90 +398,72 @@ router.post('/chat/completions', async (req, res) => {
 
   try {
     const { model, messages, stream = false } = req.body;
-    
-    let stopTokens = [];
-    let foundStopString = false;
-    const stopStringRegex = /<\|Stop-String\|>(.*?)<\|Stop-String\|>/;
+    let extractedStopTokens = [];
+    let processedMessages = [];
+    let foundStopStringPattern = false;
 
-    // 遍历消息查找停止字符串
+    // 从messages中提取停止字符串并移除标记
     for (const message of messages) {
-      if (typeof message.content === 'string') {
-        const match = message.content.match(stopStringRegex);
-        if (match && match[1]) {
-          // 提取并分割停止字符串
-          stopTokens = match[1].split(',').map(token => token.trim()).filter(token => token.length > 0);
-          // 从消息内容中移除该模式
-          message.content = message.content.replace(stopStringRegex, '').trim();
-          foundStopString = true;
-          // 只处理第一个找到的停止字符串结构
-          break; 
+      let content = message.content || '';
+      const stopStringPattern = /<\|Stop-String\|>(.*?)<\|Stop-String\|>/s;
+      const match = content.match(stopStringPattern);
+
+      if (match && match[1] && !foundStopStringPattern) {
+        // 只处理找到的第一个匹配
+        const stopStrings = match[1].split(',').map(s => s.trim()).filter(s => s.length > 0);
+        extractedStopTokens = stopStrings;
+        foundStopStringPattern = true;
+
+        // 移除content中的停止字符串标记
+        content = content.replace(stopStringPattern, '').trim();
+
+        // 如果移除后内容为空，考虑删除该消息或保留角色信息
+        if (content === '') {
+            // Option 1: Keep role but empty content, prevents removing valid turn.
+             processedMessages.push({ ...message, content: '' });
+            // Option 2: Remove message entirely if content becomes empty.
+            // continue;
+        } else {
+             processedMessages.push({ ...message, content });
         }
-      }
-    }
-
-    // 如果没有找到指定的停止字符串格式，返回错误
-    if (!foundStopString) {
-      const errorMessage = '预设错误，请使用指定预设结构';
-      const responseId = `chatcmpl-${uuidv4()}`;
-      const model = req.body.model || 'unknown';
-
-      if (stream) {
-        // 流式响应格式
-        res.setHeader('Content-Type', 'text/event-stream');
-        res.setHeader('Cache-Control', 'no-cache');
-        res.setHeader('Connection', 'keep-alive');
-        
-        res.write(
-          `data: ${JSON.stringify({
-            id: responseId,
-            object: 'chat.completion.chunk',
-            created: Math.floor(Date.now() / 1000),
-            model: model,
-            choices: [
-              {
-                index: 0,
-                delta: {
-                  content: errorMessage,
-                },
-              },
-            ],
-          })}\n\n`
-        );
-        res.write('data: [DONE]\n\n');
-        res.end();
       } else {
-        // 非流式响应格式
-        res.json({
-          id: responseId,
-          object: 'chat.completion',
-          created: Math.floor(Date.now() / 1000),
-          model: model,
-          choices: [
-            {
-              index: 0,
-              message: {
-                role: 'assistant',
-                content: errorMessage,
-              },
-              finish_reason: 'stop',
-            },
-          ],
-          usage: {
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            total_tokens: 0,
-          },
-        });
+        // 如果没有找到模式或者已经找到过模式，直接添加原始消息
+        processedMessages.push(message);
       }
-      return; // 返回后不再继续处理
     }
 
-    // 添加内置的停止字符串，但仅在用户未提供时添加
-    // 根据新的逻辑，我们不再自动添加 <Revelation>，只使用用户指定的或空
-    // if (!stopTokens.includes("<Revelation>")) {
-    //   stopTokens.push("<Revelation>");
-    // }
-    let bearerToken = req.headers.authorization?.replace('Bearer ', '');
+    // 如果没有找到停止字符串模式，返回错误
+    if (!foundStopStringPattern) {
+      return res.json({
+        id: `chatcmpl-${uuidv4()}`,
+        object: 'chat.completion',
+        created: Math.floor(Date.now() / 1000),
+        model: model || 'unknown',
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: 'assistant',
+              content: '预设错误，请使用指定预设结构',
+            },
+            finish_reason: 'stop',
+          },
+        ],
+        usage: {
+          prompt_tokens: 0,
+          completion_tokens: 0,
+          total_tokens: 0,
+        },
+      });
+    }
+
+         // 使用提取的停止字符串
+     const stopTokens = extractedStopTokens;
+     
+     // 记录本次回复的所有停止字符串
+     logger.info(`本次回复使用的停止字符串: [${stopTokens.join(', ')}]`);
+
+     let bearerToken = req.headers.authorization?.replace('Bearer ', '');
     
     // 使用keyManager获取实际的cookie
     let authToken = keyManager.getCookieForApiKey(bearerToken);
@@ -496,7 +478,7 @@ router.post('/chat/completions', async (req, res) => {
       authToken = authToken.split('::')[1];
     }
 
-    if (!messages || !Array.isArray(messages) || messages.length === 0 || !authToken) {
+    if (!processedMessages || processedMessages.length === 0 || !authToken) {
       return res.status(400).json({
         error: 'Invalid request. Messages should be a non-empty array and authorization is required',
       });
@@ -521,7 +503,7 @@ router.post('/chat/completions', async (req, res) => {
       }
     }
     
-    const cursorBody = generateCursorBody(messages, model);
+    const cursorBody = generateCursorBody(processedMessages, model);
     
     // 添加代理支持
     const dispatcher = config.proxy && config.proxy.enabled
@@ -860,14 +842,21 @@ router.post('/chat/completions', async (req, res) => {
               for (const stopToken of stopTokens) {
                 const stopIndex = accumulatedContent.indexOf(stopToken);
                 if (stopIndex !== -1) {
-                  // 如果找到停止字符串，只发送到停止字符串之前的内容
+                  // 记录检测到停止字符串的日志
+                  logger.info(`检测到停止字符串: "${stopToken}" 在位置 ${stopIndex}，累积内容长度: ${accumulatedContent.length}`);
+                  
+                  // 如果找到停止字符串，立即停止，不管停止字符串在哪个chunk中
                   const lastChunkIndex = accumulatedContent.length - result.content.length;
-                  // 检查停止字符串是否在当前块中
+                  
                   if (stopIndex >= lastChunkIndex) {
-                    // 停止字符串在当前块中
+                    // 停止字符串在当前块中，只发送到停止字符串之前的内容
                     contentToSend = result.content.substring(0, stopIndex - lastChunkIndex);
-                    shouldStop = true;
+                  } else {
+                    // 停止字符串在之前的chunks中，不发送当前chunk的任何内容
+                    contentToSend = '';
                   }
+                  
+                  shouldStop = true;
                   break;
                 }
               }
@@ -903,7 +892,6 @@ router.post('/chat/completions', async (req, res) => {
               
               try {
                 controller.abort();
-                logger.debug(`检测到停止字符串 (API Key: [${bearerToken}]), 已中止与Cursor的连接。`);
               } catch (abortError) {
                 logger.error('中止Cursor连接时出错 (停止字符串):', abortError);
               }
@@ -1093,6 +1081,21 @@ router.post('/chat/completions', async (req, res) => {
           // 对解析后的字符串进行进一步处理
           text = text.replace(/^.*<\|END_USER\|>/s, '');
           text = text.replace(/^\n[a-zA-Z]?/, '').trim();
+          
+          // 检查停止字符串并截断内容
+          if (stopTokens.length > 0) {
+            for (const stopToken of stopTokens) {
+              const stopIndex = text.indexOf(stopToken);
+              if (stopIndex !== -1) {
+                // 记录检测到停止字符串的日志
+                logger.info(`非流式响应检测到停止字符串: "${stopToken}" 在位置 ${stopIndex}`);
+                
+                // 截断到停止字符串之前的内容
+                text = text.substring(0, stopIndex);
+                break;
+              }
+            }
+          }
           
           // 如果存在thinking内容，添加标签
           let finalContent = text;
