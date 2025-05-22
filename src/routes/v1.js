@@ -398,8 +398,89 @@ router.post('/chat/completions', async (req, res) => {
 
   try {
     const { model, messages, stream = false } = req.body;
-    const stopTokens = Array.isArray(req.body.stop) ? req.body.stop : 
-                      (typeof req.body.stop === 'string' ? [req.body.stop] : []);
+    
+    let stopTokens = [];
+    let foundStopString = false;
+    const stopStringRegex = /<\|Stop-String\|>(.*?)<\|Stop-String\|>/;
+
+    // 遍历消息查找停止字符串
+    for (const message of messages) {
+      if (typeof message.content === 'string') {
+        const match = message.content.match(stopStringRegex);
+        if (match && match[1]) {
+          // 提取并分割停止字符串
+          stopTokens = match[1].split(',').map(token => token.trim()).filter(token => token.length > 0);
+          // 从消息内容中移除该模式
+          message.content = message.content.replace(stopStringRegex, '').trim();
+          foundStopString = true;
+          // 只处理第一个找到的停止字符串结构
+          break; 
+        }
+      }
+    }
+
+    // 如果没有找到指定的停止字符串格式，返回错误
+    if (!foundStopString) {
+      const errorMessage = '预设错误，请使用指定预设结构';
+      const responseId = `chatcmpl-${uuidv4()}`;
+      const model = req.body.model || 'unknown';
+
+      if (stream) {
+        // 流式响应格式
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-cache');
+        res.setHeader('Connection', 'keep-alive');
+        
+        res.write(
+          `data: ${JSON.stringify({
+            id: responseId,
+            object: 'chat.completion.chunk',
+            created: Math.floor(Date.now() / 1000),
+            model: model,
+            choices: [
+              {
+                index: 0,
+                delta: {
+                  content: errorMessage,
+                },
+              },
+            ],
+          })}\n\n`
+        );
+        res.write('data: [DONE]\n\n');
+        res.end();
+      } else {
+        // 非流式响应格式
+        res.json({
+          id: responseId,
+          object: 'chat.completion',
+          created: Math.floor(Date.now() / 1000),
+          model: model,
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: 'assistant',
+                content: errorMessage,
+              },
+              finish_reason: 'stop',
+            },
+          ],
+          usage: {
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+          },
+        });
+      }
+      return; // 返回后不再继续处理
+    }
+
+    // 添加内置的停止字符串，但仅在用户未提供时添加
+    // 根据新的逻辑，我们不再自动添加 <Revelation>，只使用用户指定的或空
+    // if (!stopTokens.includes("<Revelation>")) {
+    //   stopTokens.push("<Revelation>");
+    // }
     let bearerToken = req.headers.authorization?.replace('Bearer ', '');
     
     // 使用keyManager获取实际的cookie
