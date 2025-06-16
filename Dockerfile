@@ -8,6 +8,10 @@ RUN npm install
 
 COPY . /app
 
+# By copying .env.example to .env, we ensure the file exists during build time.
+# This can prevent "file not found" errors from application pre-flight checks.
+COPY .env.example .env
+
 RUN chmod -R 777 /app
 
 # Create a startup script to generate .env file from environment variables
