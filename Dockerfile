@@ -15,18 +15,21 @@ COPY .env-example .env
 RUN chmod -R 777 /app
 
 # Create a startup script to generate .env file from environment variables
-# Using a heredoc (cat <<EOF) is more robust for handling complex variables with special characters like JSON strings.
 RUN echo '#!/bin/sh' > /app/docker-entrypoint.sh && \
-    echo "cat <<EOF > /app/.env" >> /app/docker-entrypoint.sh && \
-    echo 'PORT=${PORT:-3010}' >> /app/docker-entrypoint.sh && \
-    echo 'MORGAN_FORMAT=${MORGAN_FORMAT:-tiny}' >> /app/docker-entrypoint.sh && \
-    echo 'API_KEYS=${API_KEYS:-{\\"sk-123\\":[]}}' >> /app/docker-entrypoint.sh && \
-    echo 'ROTATION_STRATEGY=${ROTATION_STRATEGY:-default}' >> /app/docker-entrypoint.sh && \
-    echo 'USE_TLS_PROXY=${USE_TLS_PROXY:-true}' >> /app/docker-entrypoint.sh && \
-    echo 'USE_OTHERS_PROXY=${USE_OTHERS_PROXY:-true}' >> /app/docker-entrypoint.sh && \
-    echo 'PROXY_PLATFORM=${PROXY_PLATFORM:-auto}' >> /app/docker-entrypoint.sh && \
-    echo 'USE_OTHERS=${USE_OTHERS:-true}' >> /app/docker-entrypoint.sh && \
-    echo "EOF" >> /app/docker-entrypoint.sh && \
+    echo 'echo "# Generated .env file from environment variables" > /app/.env' >> /app/docker-entrypoint.sh && \
+    echo 'echo "PORT=${PORT:-3010}" >> /app/.env' >> /app/docker-entrypoint.sh && \
+    echo 'echo "MORGAN_FORMAT=${MORGAN_FORMAT:-tiny}" >> /app/.env' >> /app/docker-entrypoint.sh && \
+    echo 'if [ -n "$API_KEYS" ]; then' >> /app/docker-entrypoint.sh && \
+    echo '  # Write API_KEYS directly to file to avoid shell interpretation issues' >> /app/docker-entrypoint.sh && \
+    echo '  echo "API_KEYS=$API_KEYS" >> /app/.env' >> /app/docker-entrypoint.sh && \
+    echo 'else' >> /app/docker-entrypoint.sh && \
+    echo '  echo "API_KEYS={\\"sk-123\\":[]}" >> /app/.env' >> /app/docker-entrypoint.sh && \
+    echo 'fi' >> /app/docker-entrypoint.sh && \
+    echo 'echo "ROTATION_STRATEGY=${ROTATION_STRATEGY:-default}" >> /app/.env' >> /app/docker-entrypoint.sh && \
+    echo 'echo "USE_TLS_PROXY=${USE_TLS_PROXY:-true}" >> /app/.env' >> /app/docker-entrypoint.sh && \
+    echo 'echo "USE_OTHERS_PROXY=${USE_OTHERS_PROXY:-true}" >> /app/.env' >> /app/docker-entrypoint.sh && \
+    echo 'echo "PROXY_PLATFORM=${PROXY_PLATFORM:-auto}" >> /app/.env' >> /app/docker-entrypoint.sh && \
+    echo 'echo "USE_OTHERS=${USE_OTHERS:-true}" >> /app/.env' >> /app/docker-entrypoint.sh && \
     echo 'exec "$@"' >> /app/docker-entrypoint.sh && \
     chmod +x /app/docker-entrypoint.sh
 
