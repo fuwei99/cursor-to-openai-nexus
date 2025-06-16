@@ -672,8 +672,8 @@ ${randomTag.replace('<', '</')}
 
       // 构建错误响应
       const errorMessage = isConnectTimeout
-        ? `⚠️ 连接超时 ⚠️\\n\\n无法连接到API服务器(api2.cursor.sh)，请检查您的网络连接或尝试使用代理。`
-        : `⚠️ 请求失败 ⚠️\\n\\n错误: ${fetchError.message}`;
+        ? `⚠️ 连接超时 ⚠️\n\n无法连接到API服务器(api2.cursor.sh)，请检查您的网络连接或尝试使用代理。`
+        : `⚠️ 请求失败 ⚠️\n\n错误: ${fetchError.message}`;
 
       if (stream) {
         // 流式响应格式的错误
@@ -806,7 +806,7 @@ ${randomTag.replace('<', '</')}
 
               // 如果成功移除，在错误消息中添加明确提示
               if (removed) {
-                errorResult.message = `⚠️ 目前Cookie已从API Key中移除 ⚠️\\n\\n${errorResult.message}`;
+                errorResult.message = `⚠️ 目前Cookie已从API Key中移除 ⚠️\n\n${errorResult.message}`;
               }
             }
 
@@ -851,7 +851,7 @@ ${randomTag.replace('<', '</')}
                       {
                         index: 0,
                         delta: {
-                          content: "<think>\\n",
+                          content: "<think>\n",
                         },
                       },
                     ],
@@ -915,7 +915,7 @@ ${randomTag.replace('<', '</')}
                     {
                       index: 0,
                       delta: {
-                        content: "\\n</think>\\n",
+                        content: "\n</think>\n",
                       },
                     },
                   ],
@@ -1006,7 +1006,7 @@ ${randomTag.replace('<', '</')}
                   {
                     index: 0,
                     delta: {
-                      content: "\\n</think>\\n",
+                      content: "\n</think>\n",
                     },
                   },
                 ],
@@ -1038,7 +1038,7 @@ ${randomTag.replace('<', '</')}
             return; // AbortError 处理完毕
           } else if (streamError.name === 'TimeoutError') {
             // 将超时错误作为assistant消息发送
-            const errorMessage = `⚠️ 请求超时 ⚠️\\n\\n错误：服务器响应超时，请稍后重试。`;
+            const errorMessage = `⚠️ 请求超时 ⚠️\n\n错误：服务器响应超时，请稍后重试。`;
             res.write(
               `data: ${JSON.stringify({
                 id: responseId,
@@ -1057,7 +1057,7 @@ ${randomTag.replace('<', '</')}
             );
           } else {
             // 将处理错误作为assistant消息发送
-            const errorMessage = `⚠️ 处理错误 ⚠️\\n\\n错误：流处理出错，请稍后重试。\\n\\n${streamError.message || ''}`;
+            const errorMessage = `⚠️ 处理错误 ⚠️\n\n错误：流处理出错，请稍后重试。\n\n${streamError.message || ''}`;
             res.write(
               `data: ${JSON.stringify({
                 id: responseId,
@@ -1124,7 +1124,7 @@ ${randomTag.replace('<', '</')}
 
               // 如果成功移除，在错误消息中添加明确提示
               if (removed) {
-                errorResult.message = `⚠️ 目前Cookie已从API Key中移除 ⚠️\\n\\n${errorResult.message}`;
+                errorResult.message = `⚠️ 目前Cookie已从API Key中移除 ⚠️\n\n${errorResult.message}`;
               }
             }
 
@@ -1193,7 +1193,7 @@ ${randomTag.replace('<', '</')}
             // 如果存在thinking内容，添加标签
             let finalContent = text;
             if (hasThinking && thinkingText.length > 0) {
-              finalContent = `<think>\\n${thinkingText}\\n</think>\\n${text}`;
+              finalContent = `<think>\n${thinkingText}\n</think>\n${text}`;
             }
             finalMessage = {
               role: 'assistant',
@@ -1234,7 +1234,7 @@ ${randomTag.replace('<', '</')}
         if (!res.headersSent) {
           if (error.name === 'TimeoutError') {
             // 使用统一的错误格式
-            const errorMessage = `⚠️ 请求超时 ⚠️\\n\\n错误：服务器响应超时，请稍后重试。`;
+            const errorMessage = `⚠️ 请求超时 ⚠️\n\n错误：服务器响应超时，请稍后重试。`;
             return res.json({
               id: `chatcmpl-${uuidv4()}`,
               object: 'chat.completion',
@@ -1270,7 +1270,7 @@ ${randomTag.replace('<', '</')}
         // 流式响应格式的错误
         const responseId = `chatcmpl-${uuidv4()}`;
         // 添加清晰的错误提示
-        const errorMessage = `⚠️ 请求失败 ⚠️\\n\\n错误：${errorText}，请稍后重试。\\n\\n${error.message || ''}`;
+        const errorMessage = `⚠️ 请求失败 ⚠️\n\n错误：${errorText}，请稍后重试。\n\n${error.message || ''}`;
         res.write(
           `data: ${JSON.stringify({
             id: responseId,
@@ -1292,7 +1292,7 @@ ${randomTag.replace('<', '</')}
       } else {
         // 非流式响应格式的错误
         // 添加清晰的错误提示
-        const errorMessage = `⚠️ 请求失败 ⚠️\\n\\n错误：${errorText}，请稍后重试。\\n\\n${error.message || ''}`;
+        const errorMessage = `⚠️ 请求失败 ⚠️\n\n错误：${errorText}，请稍后重试。\n\n${error.message || ''}`;
         res.json({
           id: `chatcmpl-${uuidv4()}`,
           object: 'chat.completion',
@@ -1906,44 +1906,44 @@ function handleCursorError(errorStr, bearerToken, originalAuthToken) {
     // 更明确的错误日志
     if (originalAuthToken === bearerToken) {
       logger.error(`检测到API Key "${bearerToken}" 中没有可用Cookie，正在尝试以向后兼容模式使用API Key本身`);
-      message = `错误：API Key "${bearerToken}" 中没有可用的Cookie。请添加有效的Cookie到此API Key，或使用其他有效的API Key。\\n\\n详细信息：${errorStr}`;
+      message = `错误：API Key "${bearerToken}" 中没有可用的Cookie。请添加有效的Cookie到此API Key，或使用其他有效的API Key。\n\n详细信息：${errorStr}`;
     } else {
       logger.error('检测到无效cookie:', originalAuthToken);
-      message = `错误：Cookie无效或已过期，请更新Cookie。\\n\\n详细信息：${errorStr}`;
+      message = `错误：Cookie无效或已过期，请更新Cookie。\n\n详细信息：${errorStr}`;
     }
     shouldRemoveCookie = true;
   } else if (errorStr.includes('You\'ve reached your trial request limit') || errorStr.includes('You\'ve reached the usage limit for free usage')) {
     logger.error('检测到额度用尽cookie:', originalAuthToken);
-    message = `错误：Cookie使用额度已用完，请更换Cookie或等待刷新。\\n\\n详细信息：${errorStr}`;
+    message = `错误：Cookie使用额度已用完，请更换Cookie或等待刷新。\n\n详细信息：${errorStr}`;
     shouldRemoveCookie = true;
   } else if (errorStr.includes('User is unauthorized')) {
     logger.error('检测到未授权cookie:', originalAuthToken);
-    message = `错误：Cookie已被封禁或失效，请更换Cookie。\\n\\n详细信息：${errorStr}`;
+    message = `错误：Cookie已被封禁或失效，请更换Cookie。\n\n详细信息：${errorStr}`;
     shouldRemoveCookie = true;
   } else if (errorStr.includes('suspicious activity checks')) {
     logger.error('检测到IP黑名单:', originalAuthToken);
-    message = `错误：IP可能被列入黑名单，请尝试更换网络环境或使用代理。\\n\\n详细信息：${errorStr}`;
+    message = `错误：IP可能被列入黑名单，请尝试更换网络环境或使用代理。\n\n详细信息：${errorStr}`;
     shouldRemoveCookie = false;
   } else if (errorStr.includes('Too many computers')) {
     logger.error('检测到账户暂时被封禁:', originalAuthToken);
-    message = `错误：账户因在多台设备登录而暂时被封禁，请稍后再试或更换账户。\\n\\n详细信息：${errorStr}`;
+    message = `错误：账户因在多台设备登录而暂时被封禁，请稍后再试或更换账户。\n\n详细信息：${errorStr}`;
     shouldRemoveCookie = true;
   } else if (errorStr.includes('Login expired') || errorStr.includes('login expired')) {
     logger.error('检测到登录过期cookie:', originalAuthToken);
-    message = `错误：Cookie登录已过期，请更新Cookie。\\n\\n详细信息：${errorStr}`;
+    message = `错误：Cookie登录已过期，请更新Cookie。\n\n详细信息：${errorStr}`;
     shouldRemoveCookie = true;
   } else if(errorStr.includes('your request has been blocked due to the use of a temporary email service for this account')) {
     logger.error('检测到临时邮箱:', originalAuthToken);
-    message = `错误：请求被阻止，检测到临时邮箱服务，请更换邮箱。\\n\\n详细信息：${errorStr}`;
+    message = `错误：请求被阻止，检测到临时邮箱服务，请更换邮箱。\n\n详细信息：${errorStr}`;
     shouldRemoveCookie = true;
   } else if (errorStr.includes('Your request has been blocked as our system has detected suspicious activity from your account')) {
     logger.error('检测到账户异常:', originalAuthToken);
-    message = `错误：请求被阻止，可能是假ban，多重试几次/更换cookie/更换设备。\\n\\n详细信息：${errorStr}`;
+    message = `错误：请求被阻止，可能是假ban，多重试几次/更换cookie/更换设备。\n\n详细信息：${errorStr}`;
     shouldRemoveCookie = false;
   } else {
     // 非Cookie相关错误
     logger.error('检测到其他错误:', errorStr);
-    message = `错误：请求失败。\\n\\n详细信息：${errorStr}`;
+    message = `错误：请求失败。\n\n详细信息：${errorStr}`;
     shouldRemoveCookie = false;
   }
   
