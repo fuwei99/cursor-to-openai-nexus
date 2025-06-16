@@ -410,6 +410,7 @@ router.post('/chat/completions', async (req, res) => {
 
   try {
     const { model, messages, stream = false } = req.body;
+    const useThinkTag = process.env.THINK_TAG === 'true';
     let extractedStopTokens = [];
     let processedMessages = JSON.parse(JSON.stringify(messages)); // 复制一份，避免修改原始请求体
     let foundStopStringPattern = false;
@@ -837,8 +838,29 @@ ${randomTag.replace('<', '</')}
             // 累积thinking内容
             accumulatedThinking += result.reasoning_content;
 
-            // 如果没有发送thinking开始标记，则发送
-            if (!hasWrittenThinkingStart) {
+            if (useThinkTag) {
+              // 如果没有发送thinking开始标记，则发送
+              if (!hasWrittenThinkingStart) {
+                res.write(
+                  `data: ${JSON.stringify({
+                    id: responseId,
+                    object: 'chat.completion.chunk',
+                    created: Math.floor(Date.now() / 1000),
+                    model: req.body.model,
+                    choices: [
+                      {
+                        index: 0,
+                        delta: {
+                          content: "<think>\\n",
+                        },
+                      },
+                    ],
+                  })}\n\n`
+                );
+                hasWrittenThinkingStart = true;
+              }
+
+              // 发送accumulated thinking内容片段
               res.write(
                 `data: ${JSON.stringify({
                   id: responseId,
@@ -849,32 +871,31 @@ ${randomTag.replace('<', '</')}
                     {
                       index: 0,
                       delta: {
-                        content: "<think>\\n",
+                        content: result.reasoning_content,
                       },
                     },
                   ],
                 })}\n\n`
               );
-              hasWrittenThinkingStart = true;
-            }
-
-            // 发送accumulated thinking内容片段
-            res.write(
-              `data: ${JSON.stringify({
-                id: responseId,
-                object: 'chat.completion.chunk',
-                created: Math.floor(Date.now() / 1000),
-                model: req.body.model,
-                choices: [
-                  {
-                    index: 0,
-                    delta: {
-                      content: result.reasoning_content,
+            } else {
+              // useThinkTag is false, send as reasoning_content
+              res.write(
+                `data: ${JSON.stringify({
+                  id: responseId,
+                  object: 'chat.completion.chunk',
+                  created: Math.floor(Date.now() / 1000),
+                  model: req.body.model,
+                  choices: [
+                    {
+                      index: 0,
+                      delta: {
+                        reasoning_content: result.reasoning_content,
+                      },
                     },
-                  },
-                ],
-              })}\n\n`
-            );
+                  ],
+                })}\n\n`
+              );
+            }
           }
 
           // 处理常规内容
@@ -883,7 +904,7 @@ ${randomTag.replace('<', '</')}
             accumulatedContent += result.content;
 
             // 如果已经有thinking内容，且尚未发送thinking结束标记，则发送
-            if (hasWrittenThinkingStart && !hasWrittenThinkingEnd) {
+            if (useThinkTag && hasWrittenThinkingStart && !hasWrittenThinkingEnd) {
               res.write(
                 `data: ${JSON.stringify({
                   id: responseId,
@@ -974,7 +995,7 @@ ${randomTag.replace('<', '</')}
         // 处理结束逻辑：确保thinking标签被正确关闭
         if (!responseEnded) {
           // 如果有thinking内容但没有发送结束标记，则发送
-          if (hasWrittenThinkingStart && !hasWrittenThinkingEnd) {
+          if (useThinkTag && hasWrittenThinkingStart && !hasWrittenThinkingEnd) {
             res.write(
               `data: ${JSON.stringify({
                 id: responseId,
@@ -1167,10 +1188,25 @@ ${randomTag.replace('<', '</')}
             }
           }
 
-          // 如果存在thinking内容，添加标签
-          let finalContent = text;
-          if (hasThinking && thinkingText.length > 0) {
-            finalContent = `<think>\\n${thinkingText}\\n</think>\\n${text}`;
+          let finalMessage;
+          if (useThinkTag) {
+            // 如果存在thinking内容，添加标签
+            let finalContent = text;
+            if (hasThinking && thinkingText.length > 0) {
+              finalContent = `<think>\\n${thinkingText}\\n</think>\\n${text}`;
+            }
+            finalMessage = {
+              role: 'assistant',
+              content: finalContent,
+            };
+          } else {
+            finalMessage = {
+              role: 'assistant',
+              content: text,
+            };
+            if (hasThinking && thinkingText.length > 0) {
+              finalMessage.reasoning_content = thinkingText;
+            }
           }
 
           res.json({
@@ -1181,10 +1217,7 @@ ${randomTag.replace('<', '</')}
             choices: [
               {
                 index: 0,
-                message: {
-                  role: 'assistant',
-                  content: finalContent,
-                },
+                message: finalMessage,
                 finish_reason: 'stop',
               },
             ],
