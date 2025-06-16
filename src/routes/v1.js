@@ -28,6 +28,10 @@ let refreshStatus = {
 // 储存当前正在处理的Cookie获取请求
 const pendingCookieRequests = new Map();
 
+// 检查环境变量，决定是否使用<think>标签包裹思维链
+const useThinkTag = process.env.THINK_TAG === 'true';
+logger.info(`思维链输出模式: ${useThinkTag ? '使用<think>标签' : '使用reasoning_content字段'}`);
+
 // 检查是否已有管理员账号
 router.get('/admin/check', (req, res) => {
   try {
@@ -410,7 +414,6 @@ router.post('/chat/completions', async (req, res) => {
 
   try {
     const { model, messages, stream = false } = req.body;
-    const useThinkTag = process.env.THINK_TAG === 'true';
     let extractedStopTokens = [];
     let processedMessages = JSON.parse(JSON.stringify(messages)); // 复制一份，避免修改原始请求体
     let foundStopStringPattern = false;
@@ -838,6 +841,7 @@ ${randomTag.replace('<', '</')}
             // 累积thinking内容
             accumulatedThinking += result.reasoning_content;
 
+            // 根据环境变量决定如何输出思维链
             if (useThinkTag) {
               // 如果没有发送thinking开始标记，则发送
               if (!hasWrittenThinkingStart) {
@@ -878,7 +882,7 @@ ${randomTag.replace('<', '</')}
                 })}\n\n`
               );
             } else {
-              // useThinkTag is false, send as reasoning_content
+              // 使用独立的reasoning_content字段
               res.write(
                 `data: ${JSON.stringify({
                   id: responseId,
@@ -903,7 +907,7 @@ ${randomTag.replace('<', '</')}
             // 累积content内容
             accumulatedContent += result.content;
 
-            // 如果已经有thinking内容，且尚未发送thinking结束标记，则发送
+            // 如果使用<think>标签，且已经有thinking内容，且尚未发送thinking结束标记，则发送
             if (useThinkTag && hasWrittenThinkingStart && !hasWrittenThinkingEnd) {
               res.write(
                 `data: ${JSON.stringify({
@@ -995,7 +999,7 @@ ${randomTag.replace('<', '</')}
         // 处理结束逻辑：确保thinking标签被正确关闭
         if (!responseEnded) {
           // 如果有thinking内容但没有发送结束标记，则发送
-          if (useThinkTag && hasWrittenThinkingStart && !hasWrittenThinkingEnd) {
+          if (hasWrittenThinkingStart && !hasWrittenThinkingEnd) {
             res.write(
               `data: ${JSON.stringify({
                 id: responseId,
@@ -1173,60 +1177,60 @@ ${randomTag.replace('<', '</')}
           text = text.replace(/^.*<\|END_USER\|>/s, '');
           text = text.replace(/^\n[a-zA-Z]?/, '').trim();
 
-          // 检查停止字符串并截断内容
-          if (stopTokens.length > 0) {
-            for (const stopToken of stopTokens) {
-              const stopIndex = text.indexOf(stopToken);
-              if (stopIndex !== -1) {
-                // 记录检测到停止字符串的日志
-                logger.info(`非流式响应检测到停止字符串: "${stopToken}" 在位置 ${stopIndex}`);
-
-                // 截断到停止字符串之前的内容
-                text = text.substring(0, stopIndex);
-                break;
-              }
-            }
-          }
-
-          let finalMessage;
+          // 根据环境变量决定如何输出思维链
           if (useThinkTag) {
             // 如果存在thinking内容，添加标签
             let finalContent = text;
             if (hasThinking && thinkingText.length > 0) {
               finalContent = `<think>\n${thinkingText}\n</think>\n${text}`;
             }
-            finalMessage = {
-              role: 'assistant',
-              content: finalContent,
-            };
-          } else {
-            finalMessage = {
-              role: 'assistant',
-              content: text,
-            };
-            if (hasThinking && thinkingText.length > 0) {
-              finalMessage.reasoning_content = thinkingText;
-            }
-          }
 
-          res.json({
-            id: `chatcmpl-${uuidv4()}`,
-            object: 'chat.completion',
-            created: Math.floor(Date.now() / 1000),
-            model,
-            choices: [
-              {
-                index: 0,
-                message: finalMessage,
-                finish_reason: 'stop',
+            res.json({
+              id: `chatcmpl-${uuidv4()}`,
+              object: 'chat.completion',
+              created: Math.floor(Date.now() / 1000),
+              model,
+              choices: [
+                {
+                  index: 0,
+                  message: {
+                    role: 'assistant',
+                    content: finalContent,
+                  },
+                  finish_reason: 'stop',
+                },
+              ],
+              usage: {
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                total_tokens: 0,
               },
-            ],
-            usage: {
-              prompt_tokens: 0,
-              completion_tokens: 0,
-              total_tokens: 0,
-            },
-          });
+            });
+          } else {
+            // 使用独立的reasoning_content字段
+            res.json({
+              id: `chatcmpl-${uuidv4()}`,
+              object: 'chat.completion',
+              created: Math.floor(Date.now() / 1000),
+              model,
+              choices: [
+                {
+                  index: 0,
+                  message: {
+                    role: 'assistant',
+                    reasoning_content: thinkingText,
+                    content: text,
+                  },
+                  finish_reason: 'stop',
+                },
+              ],
+              usage: {
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                total_tokens: 0,
+              },
+            });
+          }
         }
       } catch (error) {
         logger.error('Non-stream error:', error);
