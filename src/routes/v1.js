@@ -310,6 +310,7 @@ router.post("/invalid-cookies", async (req, res) => {
   }
 });
 
+// 获取可用模型列表
 router.get("/models", async (req, res) => {
   try{
     let bearerToken = req.headers.authorization?.replace('Bearer ', '');
@@ -324,8 +325,8 @@ router.get("/models", async (req, res) => {
       authToken = authToken.split('::')[1];
     }
 
-    const checksum = req.headers['x-cursor-checksum'] 
-      ?? process.env['x-cursor-checksum'] 
+    const checksum = req.headers['x-cursor-checksum']
+      ?? process.env['x-cursor-checksum']
       ?? generateCursorChecksum(authToken.trim());
     //const cursorClientVersion = "0.45.11"
     const cursorClientVersion = "0.50.4";
@@ -351,18 +352,29 @@ router.get("/models", async (req, res) => {
     try{
       const models = $root.AvailableModelsResponse.decode(buffer).models;
 
+      // 生成带前缀的模型列表
+      const prefixedModels = models.map(model => ({
+        id: `[auto]-${model.name}`,
+        created: Date.now(),
+        object: 'model',
+        owned_by: 'cursor'
+      }));
+
+      // 合并原始模型和带前缀的模型
+      const combinedModels = models.map(model => ({
+        id: model.name,
+        created: Date.now(),
+        object: 'model',
+        owned_by: 'cursor'
+      })).concat(prefixedModels);
+
       return res.json({
         object: "list",
-        data: models.map(model => ({
-          id: model.name,
-          created: Date.now(),
-          object: 'model',
-          owned_by: 'cursor'
-        }))
+        data: combinedModels
       })
     } catch (error) {
       const text = buffer.toString('utf-8');
-      throw new Error(text);      
+      throw new Error(text);
     }
   }
   catch (error) {
@@ -389,8 +401,8 @@ router.post('/chat/completions', async (req, res) => {
     });
   }
 
-  // 检查未支持的模型和流式传输
-  if (typeof req.body.model === 'string' && req.body.model.startsWith('o1-') && req.body.stream) {
+  // 检查未支持的模型和流式传输 (对原始模型进行检查)
+  if (typeof req.body.model === 'string' && req.body.model.replace('[auto]-', '').startsWith('o1-') && req.body.stream) {
     return res.status(400).json({
       error: 'Model not supported stream',
     });
@@ -399,18 +411,72 @@ router.post('/chat/completions', async (req, res) => {
   try {
     const { model, messages, stream = false } = req.body;
     let extractedStopTokens = [];
-    let processedMessages = [];
+    let processedMessages = JSON.parse(JSON.stringify(messages)); // 复制一份，避免修改原始请求体
     let foundStopStringPattern = false;
 
-    // 从messages中提取停止字符串并移除标记
-    for (const message of messages) {
+    let actualModel = model; // 实际发送给Cursor的模型名称
+    const autoPrefix = '[auto]-';
+
+    // 检查并处理带前缀的模型
+    if (typeof model === 'string' && model.startsWith(autoPrefix)) {
+      actualModel = model.substring(autoPrefix.length); // 移除前缀
+      logger.info(`检测到预定模板模型: ${model}, 实际使用模型: ${actualModel}`);
+
+      // 定义模板和随机标签
+      const template = `
+<|Stop-String|><In-The-End>::<S-top>::<The-End>::<stop-string>::<stop-str>::<stop-word>::<STOP-s><|Stop-String|>
+###Please ensure to output the following stop string wrapped in xml tag {{random}} at the end of each reply:
+
+Ending this round of conversation: Ten, nine, eight, seven, six, five, four, three, two, one. This round of replies has been perfectly completed!
+`;
+      const tags = ['<In-The-End>', '<S-top>', '<The-End>', '<stop-string>', '<stop-str>', '<stop-word>', '<STOP-s>'];
+
+      // 1. 随机选择一个标签，确保本次请求中所有注入都使用这一个
+      const randomTag = tags[Math.floor(Math.random() * tags.length)];
+
+      // 2. 构建注入系统消息的指令
+      const processedTemplate = template.replace('{{random}}', randomTag);
+
+      // 3. 构建追加到assistant消息的声明
+      const declarationString = `
+${randomTag}
+Ending this round of conversation: Ten, nine, eight, seven, six, five, four, three, two, one. This round of replies has been perfectly completed!
+${randomTag.replace('<', '</')}
+`;
+
+      // 4. 将指令注入到系统消息中 (不存在则创建)
+      let systemMessage = processedMessages.find(m => m.role === 'system');
+      if (systemMessage) {
+        systemMessage.content = (systemMessage.content || '') + '\n\n' + processedTemplate;
+        logger.debug('已将模板追加到现有系统消息');
+      } else {
+        processedMessages.unshift({ role: 'system', content: processedTemplate });
+        logger.debug('未找到系统消息，已创建并添加新的系统消息');
+      }
+
+      // 5. 将声明追加到最后5条assistant消息
+      let assistantMessagesToModify = 5;
+      for (let i = processedMessages.length - 1; i >= 0 && assistantMessagesToModify > 0; i--) {
+        if (processedMessages[i].role === 'assistant') {
+          processedMessages[i].content = (processedMessages[i].content || '') + declarationString;
+          assistantMessagesToModify--;
+        }
+      }
+      logger.debug(`已将声明追加到 ${5 - assistantMessagesToModify} 条assistant消息`);
+
+       // 在处理完预设模板后，确保foundStopStringPattern为false，以便后续的停止字符串提取逻辑能够运行在processedMessages上
+       foundStopStringPattern = false; // 重置foundStopStringPattern
+    }
+
+    // 从messages中提取停止字符串并移除标记 (现在会作用于可能修改过的processedMessages)
+    for (const message of processedMessages) {
       let content = message.content || '';
       const stopStringPattern = /<\|Stop-String\|>(.*?)<\|Stop-String\|>/s;
       const match = content.match(stopStringPattern);
 
       if (match && match[1] && !foundStopStringPattern) {
         // 只处理找到的第一个匹配
-        const stopStrings = match[1].split(',').map(s => s.trim()).filter(s => s.length > 0);
+        const stopStrings = match[1].split('::').map(s => s.trim()).filter(s => s.length > 0);
         extractedStopTokens = stopStrings;
         foundStopStringPattern = true;
 
@@ -420,19 +486,20 @@ router.post('/chat/completions', async (req, res) => {
         // 如果移除后内容为空，考虑删除该消息或保留角色信息
         if (content === '') {
             // Option 1: Keep role but empty content, prevents removing valid turn.
-             processedMessages.push({ ...message, content: '' });
+             message.content = ''; // 直接修改processedMessages中的对象
             // Option 2: Remove message entirely if content becomes empty.
-            // continue;
+            // continue; // 这需要重建processedMessages数组
         } else {
-             processedMessages.push({ ...message, content });
+             message.content = content; // 直接修改processedMessages中的对象
         }
-      } else {
-        // 如果没有找到模式或者已经找到过模式，直接添加原始消息
-        processedMessages.push(message);
+      } else if (foundStopStringPattern) {
+         // 如果已经找到模式，直接使用原始内容，不再进行移除操作
+         // message.content 保持不变
       }
     }
 
-    // 如果没有找到停止字符串模式，返回错误
+    // 如果没有找到停止字符串模式，返回错误 (现在只有在没有[auto]-前缀模型且没有找到标记时才会触发)
+    // 对于[auto]-前缀模型，由于模板中包含了标记，foundStopStringPattern会被设置为true
     if (!foundStopStringPattern) {
       return res.json({
         id: `chatcmpl-${uuidv4()}`,
@@ -457,14 +524,14 @@ router.post('/chat/completions', async (req, res) => {
       });
     }
 
-         // 使用提取的停止字符串
-     const stopTokens = extractedStopTokens;
-     
-     // 记录本次回复的所有停止字符串
-     logger.info(`本次回复使用的停止字符串: [${stopTokens.join(', ')}]`);
+    // 使用提取的停止字符串
+    const stopTokens = extractedStopTokens;
 
-     let bearerToken = req.headers.authorization?.replace('Bearer ', '');
-    
+    // 记录本次回复的所有停止字符串
+    logger.info(`本次回复使用的停止字符串: [${stopTokens.join(', ')}]`);
+
+    let bearerToken = req.headers.authorization?.replace('Bearer ', '');
+
     // 使用keyManager获取实际的cookie
     let authToken = keyManager.getCookieForApiKey(bearerToken);
     // 保存原始cookie，用于后续可能的错误处理
@@ -478,20 +545,21 @@ router.post('/chat/completions', async (req, res) => {
       authToken = authToken.split('::')[1];
     }
 
+    // 使用processedMessages (可能包含追加的模板)
     if (!processedMessages || processedMessages.length === 0 || !authToken) {
       return res.status(400).json({
         error: 'Invalid request. Messages should be a non-empty array and authorization is required',
       });
     }
 
-    const checksum = req.headers['x-cursor-checksum'] 
-      ?? process.env['x-cursor-checksum'] 
+    const checksum = req.headers['x-cursor-checksum']
+      ?? process.env['x-cursor-checksum']
       ?? generateCursorChecksum(authToken.trim());
 
     const sessionid = uuidv5(authToken,  uuidv5.DNS);
     const clientKey = generateHashed64Hex(authToken);
     const cursorClientVersion = "0.50.4";
-    
+
     // 在请求聊天接口前，依次调用6个接口
     if (process.env.USE_OTHERS === 'true') {
       try{
@@ -502,9 +570,12 @@ router.post('/chat/completions', async (req, res) => {
         logger.error(error.message);
       }
     }
-    
-    const cursorBody = generateCursorBody(processedMessages, model);
-    
+
+    // 使用实际发送给Cursor的模型名称 (不带前缀)
+    logger.info('发送给Cursor的完整消息上下文:', JSON.stringify(processedMessages, null, 2));
+    logger.info('发送给Cursor的实际模型:', actualModel);
+    const cursorBody = generateCursorBody(processedMessages, actualModel);
+
     // 添加代理支持
     const dispatcher = config.proxy && config.proxy.enabled
       ? new ProxyAgent(config.proxy.url, { allowH2: true })
@@ -512,13 +583,13 @@ router.post('/chat/completions', async (req, res) => {
 
     // 根据.env配置决定是否使用TLS代理
     const useTlsProxy = process.env.USE_TLS_PROXY === 'true';
-    
+
     // 创建AbortController用于能够中止请求
     const controller = new AbortController();
     const signal = controller.signal;
-    
+
     let response;
-    
+
     try {
       if (useTlsProxy) {
         // 使用JA3指纹伪造代理服务器
@@ -592,16 +663,16 @@ router.post('/chat/completions', async (req, res) => {
       }
     } catch (fetchError) {
       logger.error(`Fetch错误: ${fetchError.message}`);
-      
+
       // 处理连接超时错误
-      const isConnectTimeout = fetchError.cause && 
-                             (fetchError.cause.code === 'UND_ERR_CONNECT_TIMEOUT' || 
+      const isConnectTimeout = fetchError.cause &&
+                             (fetchError.cause.code === 'UND_ERR_CONNECT_TIMEOUT' ||
                               fetchError.message.includes('Connect Timeout Error'));
-      
+
       // 构建错误响应
-      const errorMessage = isConnectTimeout 
-        ? `⚠️ 连接超时 ⚠️\n\n无法连接到API服务器(api2.cursor.sh)，请检查您的网络连接或尝试使用代理。`
-        : `⚠️ 请求失败 ⚠️\n\n错误: ${fetchError.message}`;
+      const errorMessage = isConnectTimeout
+        ? `⚠️ 连接超时 ⚠️\\n\\n无法连接到API服务器(api2.cursor.sh)，请检查您的网络连接或尝试使用代理。`
+        : `⚠️ 请求失败 ⚠️\\n\\n错误: ${fetchError.message}`;
 
       if (stream) {
         // 流式响应格式的错误
@@ -681,16 +752,16 @@ router.post('/chat/completions', async (req, res) => {
 
       // 监听客户端断开连接事件
       req.on('close', () => {
-        if (!responseEnded) { 
+        if (!responseEnded) {
           logger.warn(`客户端已断开连接 (API Key: [${bearerToken}]), 正在中止对Cursor服务端的请求...`);
-          controller.abort(); 
-          responseEnded = true; 
+          controller.abort();
+          responseEnded = true;
           // cleanupCurrentController 会在 res 'close' 时被调用
         }
       });
 
       const responseId = `chatcmpl-${uuidv4()}`;
-      
+
       let isThinking_status = 0; //0为没有思考，1为处于思考状态
       try {
         let responseEnded = false; // 添加标志，标记响应是否已结束
@@ -699,13 +770,13 @@ router.post('/chat/completions', async (req, res) => {
         let hasWrittenContent = false; // 标记是否已发送content
         let accumulatedThinking = ''; // 累积thinking内容
         let accumulatedContent = ''; // 累积content内容
-        
+
         for await (const chunk of response.body) {
           // 如果响应已结束，不再处理后续数据
           if (responseEnded) {
             continue;
           }
-          
+
           let result = {};
           try {
             result = chunkToUtf8String(chunk);
@@ -713,32 +784,32 @@ router.post('/chat/completions', async (req, res) => {
             logger.error('解析响应块失败:', error);
             // 提供默认的空结果，避免后续处理出错
             result = {
-              isThink: false, 
-              thinkingContent: '', 
+              isThink: false,
+              thinkingContent: '',
               content: '',
               error: `解析错误: ${error.message}`
             };
           }
-          
+
           // 检查是否返回了错误对象
           if (result && typeof result === 'object' && result.error) {
             // 检查是否包含特定的无效cookie错误信息
             const errorStr = typeof result.error === 'string' ? result.error : JSON.stringify(result.error);
-            
+
             // 处理错误并获取结果
             const errorResult = handleCursorError(errorStr, bearerToken, originalAuthToken);
-            
+
             // 如果是需要移除的cookie，从API Key中移除
             if (errorResult.shouldRemoveCookie) {
               const removed = keyManager.removeCookieFromApiKey(bearerToken, originalAuthToken);
               logger.info(`Cookie移除${removed ? '成功' : '失败'}`);
-              
+
               // 如果成功移除，在错误消息中添加明确提示
               if (removed) {
-                errorResult.message = `⚠️ 目前Cookie已从API Key中移除 ⚠️\n\n${errorResult.message}`;
+                errorResult.message = `⚠️ 目前Cookie已从API Key中移除 ⚠️\\n\\n${errorResult.message}`;
               }
             }
-            
+
             // 返回错误信息给客户端，作为assistant消息
             res.write(
               `data: ${JSON.stringify({
@@ -756,7 +827,7 @@ router.post('/chat/completions', async (req, res) => {
                 ],
               })}\n\n`
             );
-            
+
             res.write('data: [DONE]\n\n');
             responseEnded = true; // 标记响应已结束
             break; // 跳出循环，不再处理后续数据
@@ -766,7 +837,7 @@ router.post('/chat/completions', async (req, res) => {
           if (result.isThink && result.thinkingContent && result.thinkingContent.length > 0) {
             // 累积thinking内容
             accumulatedThinking += result.thinkingContent;
-            
+
             // 如果没有发送thinking开始标记，则发送
             if (!hasWrittenThinkingStart) {
               res.write(
@@ -779,7 +850,7 @@ router.post('/chat/completions', async (req, res) => {
                     {
                       index: 0,
                       delta: {
-                        content: "<think>\n",
+                        content: "<think>\\n",
                       },
                     },
                   ],
@@ -787,7 +858,7 @@ router.post('/chat/completions', async (req, res) => {
               );
               hasWrittenThinkingStart = true;
             }
-            
+
             // 发送accumulated thinking内容片段
             res.write(
               `data: ${JSON.stringify({
@@ -811,7 +882,7 @@ router.post('/chat/completions', async (req, res) => {
           if (result.content && result.content.length > 0) {
             // 累积content内容
             accumulatedContent += result.content;
-            
+
             // 如果已经有thinking内容，且尚未发送thinking结束标记，则发送
             if (hasWrittenThinkingStart && !hasWrittenThinkingEnd) {
               res.write(
@@ -824,7 +895,7 @@ router.post('/chat/completions', async (req, res) => {
                     {
                       index: 0,
                       delta: {
-                        content: "\n</think>\n",
+                        content: "\\n</think>\\n",
                       },
                     },
                   ],
@@ -836,7 +907,7 @@ router.post('/chat/completions', async (req, res) => {
             // 检查是否遇到停止字符串
             let shouldStop = false;
             let contentToSend = result.content;
-            
+
             // 检查停止字符串
             if (stopTokens.length > 0) {
               for (const stopToken of stopTokens) {
@@ -844,10 +915,10 @@ router.post('/chat/completions', async (req, res) => {
                 if (stopIndex !== -1) {
                   // 记录检测到停止字符串的日志
                   logger.info(`检测到停止字符串: "${stopToken}" 在位置 ${stopIndex}，累积内容长度: ${accumulatedContent.length}`);
-                  
+
                   // 如果找到停止字符串，立即停止，不管停止字符串在哪个chunk中
                   const lastChunkIndex = accumulatedContent.length - result.content.length;
-                  
+
                   if (stopIndex >= lastChunkIndex) {
                     // 停止字符串在当前块中，只发送到停止字符串之前的内容
                     contentToSend = result.content.substring(0, stopIndex - lastChunkIndex);
@@ -855,7 +926,7 @@ router.post('/chat/completions', async (req, res) => {
                     // 停止字符串在之前的chunks中，不发送当前chunk的任何内容
                     contentToSend = '';
                   }
-                  
+
                   shouldStop = true;
                   break;
                 }
@@ -883,13 +954,13 @@ router.post('/chat/completions', async (req, res) => {
               );
               hasWrittenContent = true;
             }
-            
+
             // 如果需要停止，发送[DONE]并结束响应
             if (shouldStop) {
               res.write('data: [DONE]\n\n');
               res.end();
               responseEnded = true;
-              
+
               try {
                 controller.abort();
               } catch (abortError) {
@@ -900,7 +971,7 @@ router.post('/chat/completions', async (req, res) => {
             }
           }
         }
-        
+
         // 处理结束逻辑：确保thinking标签被正确关闭
         if (!responseEnded) {
           // 如果有thinking内容但没有发送结束标记，则发送
@@ -915,14 +986,14 @@ router.post('/chat/completions', async (req, res) => {
                   {
                     index: 0,
                     delta: {
-                      content: "\n</think>\n",
+                      content: "\\n</think>\\n",
                     },
                   },
                 ],
               })}\n\n`
             );
           }
-          
+
           res.write('data: [DONE]\n\n');
           res.end();
           // cleanupCurrentController 会在 res 'finish' 时被调用
@@ -934,7 +1005,7 @@ router.post('/chat/completions', async (req, res) => {
         } else {
           logger.error(`Stream error (API Key: [${bearerToken}]):`, streamError);
         }
-        
+
         if (!res.writableEnded) {
           if (streamError.name === 'AbortError') {
             // AbortError 通常意味着我们主动中止，响应可能已处理或将由 'close' 事件处理
@@ -947,7 +1018,7 @@ router.post('/chat/completions', async (req, res) => {
             return; // AbortError 处理完毕
           } else if (streamError.name === 'TimeoutError') {
             // 将超时错误作为assistant消息发送
-            const errorMessage = `⚠️ 请求超时 ⚠️\n\n错误：服务器响应超时，请稍后重试。`;
+            const errorMessage = `⚠️ 请求超时 ⚠️\\n\\n错误：服务器响应超时，请稍后重试。`;
             res.write(
               `data: ${JSON.stringify({
                 id: responseId,
@@ -966,7 +1037,7 @@ router.post('/chat/completions', async (req, res) => {
             );
           } else {
             // 将处理错误作为assistant消息发送
-            const errorMessage = `⚠️ 处理错误 ⚠️\n\n错误：流处理出错，请稍后重试。\n\n${streamError.message || ''}`;
+            const errorMessage = `⚠️ 处理错误 ⚠️\\n\\n错误：流处理出错，请稍后重试。\\n\\n${streamError.message || ''}`;
             res.write(
               `data: ${JSON.stringify({
                 id: responseId,
@@ -994,13 +1065,13 @@ router.post('/chat/completions', async (req, res) => {
         let thinkingText = '';
         let hasThinking = false;
         let responseEnded = false; // 添加标志，标记响应是否已结束
-        
+
         for await (const chunk of response.body) {
           // 如果响应已结束，不再处理后续数据
           if (responseEnded) {
             continue;
           }
-          
+
           let result = {};
           try {
             result = chunkToUtf8String(chunk);
@@ -1008,35 +1079,35 @@ router.post('/chat/completions', async (req, res) => {
             logger.error('非流式响应解析块失败:', error);
             // 提供默认的空结果，避免后续处理出错
             result = {
-              thinkingContent: '', 
+              thinkingContent: '',
               content: '',
               error: `解析错误: ${error.message}`
             };
           }
           // 输出完整的result内容和类型，便于调试
           //console.log("收到的非流式响应:", typeof result, result && typeof result === 'object' ? JSON.stringify(result) : result);
-          
+
           // 检查是否返回了错误对象
           if (result && typeof result === 'object' && result.error) {
             //console.error('检测到错误响应:', result.error);
-            
+
             // 检查是否包含特定的无效cookie错误信息
             const errorStr = typeof result.error === 'string' ? result.error : JSON.stringify(result.error);
-            
+
             // 处理错误并获取结果
             const errorResult = handleCursorError(errorStr, bearerToken, originalAuthToken);
-            
+
             // 如果是需要移除的cookie，从API Key中移除
             if (errorResult.shouldRemoveCookie) {
               const removed = keyManager.removeCookieFromApiKey(bearerToken, originalAuthToken);
               logger.info(`Cookie移除${removed ? '成功' : '失败'}`);
-              
+
               // 如果成功移除，在错误消息中添加明确提示
               if (removed) {
-                errorResult.message = `⚠️ 目前Cookie已从API Key中移除 ⚠️\n\n${errorResult.message}`;
+                errorResult.message = `⚠️ 目前Cookie已从API Key中移除 ⚠️\\n\\n${errorResult.message}`;
               }
             }
-            
+
             // 无效cookie错误，格式化为assistant消息
             res.json({
               id: `chatcmpl-${uuidv4()}`,
@@ -1059,29 +1130,29 @@ router.post('/chat/completions', async (req, res) => {
                 total_tokens: 0,
               },
             });
-            
+
             responseEnded = true; // 标记响应已结束
             break; // 跳出循环，不再处理后续数据
           }
-          
+
           // 处理thinking内容
           if (result.thinkingContent && result.thinkingContent.length > 0) {
             thinkingText += result.thinkingContent;
             hasThinking = true;
           }
-          
+
           // 处理正常文本内容
           if (result.content && typeof result.content === 'string') {
             text += result.content;
           }
         }
-        
+
         // 只有在响应尚未结束的情况下，才处理和返回结果
         if (!responseEnded) {
           // 对解析后的字符串进行进一步处理
           text = text.replace(/^.*<\|END_USER\|>/s, '');
           text = text.replace(/^\n[a-zA-Z]?/, '').trim();
-          
+
           // 检查停止字符串并截断内容
           if (stopTokens.length > 0) {
             for (const stopToken of stopTokens) {
@@ -1089,18 +1160,18 @@ router.post('/chat/completions', async (req, res) => {
               if (stopIndex !== -1) {
                 // 记录检测到停止字符串的日志
                 logger.info(`非流式响应检测到停止字符串: "${stopToken}" 在位置 ${stopIndex}`);
-                
+
                 // 截断到停止字符串之前的内容
                 text = text.substring(0, stopIndex);
                 break;
               }
             }
           }
-          
+
           // 如果存在thinking内容，添加标签
           let finalContent = text;
           if (hasThinking && thinkingText.length > 0) {
-            finalContent = `<think>\n${thinkingText}\n</think>\n${text}`;
+            finalContent = `<think>\\n${thinkingText}\\n</think>\\n${text}`;
           }
 
           res.json({
@@ -1131,7 +1202,7 @@ router.post('/chat/completions', async (req, res) => {
         if (!res.headersSent) {
           if (error.name === 'TimeoutError') {
             // 使用统一的错误格式
-            const errorMessage = `⚠️ 请求超时 ⚠️\n\n错误：服务器响应超时，请稍后重试。`;
+            const errorMessage = `⚠️ 请求超时 ⚠️\\n\\n错误：服务器响应超时，请稍后重试。`;
             return res.json({
               id: `chatcmpl-${uuidv4()}`,
               object: 'chat.completion',
@@ -1162,12 +1233,12 @@ router.post('/chat/completions', async (req, res) => {
     logger.error('Error:', error);
     if (!res.headersSent) {
       const errorText = error.name === 'TimeoutError' ? '请求超时' : '服务器内部错误';
-      
+
       if (req.body.stream) {
         // 流式响应格式的错误
         const responseId = `chatcmpl-${uuidv4()}`;
         // 添加清晰的错误提示
-        const errorMessage = `⚠️ 请求失败 ⚠️\n\n错误：${errorText}，请稍后重试。\n\n${error.message || ''}`;
+        const errorMessage = `⚠️ 请求失败 ⚠️\\n\\n错误：${errorText}，请稍后重试。\\n\\n${error.message || ''}`;
         res.write(
           `data: ${JSON.stringify({
             id: responseId,
@@ -1189,7 +1260,7 @@ router.post('/chat/completions', async (req, res) => {
       } else {
         // 非流式响应格式的错误
         // 添加清晰的错误提示
-        const errorMessage = `⚠️ 请求失败 ⚠️\n\n错误：${errorText}，请稍后重试。\n\n${error.message || ''}`;
+        const errorMessage = `⚠️ 请求失败 ⚠️\\n\\n错误：${errorText}，请稍后重试。\\n\\n${error.message || ''}`;
         res.json({
           id: `chatcmpl-${uuidv4()}`,
           object: 'chat.completion',
@@ -1803,44 +1874,44 @@ function handleCursorError(errorStr, bearerToken, originalAuthToken) {
     // 更明确的错误日志
     if (originalAuthToken === bearerToken) {
       logger.error(`检测到API Key "${bearerToken}" 中没有可用Cookie，正在尝试以向后兼容模式使用API Key本身`);
-      message = `错误：API Key "${bearerToken}" 中没有可用的Cookie。请添加有效的Cookie到此API Key，或使用其他有效的API Key。\n\n详细信息：${errorStr}`;
+      message = `错误：API Key "${bearerToken}" 中没有可用的Cookie。请添加有效的Cookie到此API Key，或使用其他有效的API Key。\\n\\n详细信息：${errorStr}`;
     } else {
       logger.error('检测到无效cookie:', originalAuthToken);
-      message = `错误：Cookie无效或已过期，请更新Cookie。\n\n详细信息：${errorStr}`;
+      message = `错误：Cookie无效或已过期，请更新Cookie。\\n\\n详细信息：${errorStr}`;
     }
     shouldRemoveCookie = true;
   } else if (errorStr.includes('You\'ve reached your trial request limit') || errorStr.includes('You\'ve reached the usage limit for free usage')) {
     logger.error('检测到额度用尽cookie:', originalAuthToken);
-    message = `错误：Cookie使用额度已用完，请更换Cookie或等待刷新。\n\n详细信息：${errorStr}`;
+    message = `错误：Cookie使用额度已用完，请更换Cookie或等待刷新。\\n\\n详细信息：${errorStr}`;
     shouldRemoveCookie = true;
   } else if (errorStr.includes('User is unauthorized')) {
     logger.error('检测到未授权cookie:', originalAuthToken);
-    message = `错误：Cookie已被封禁或失效，请更换Cookie。\n\n详细信息：${errorStr}`;
+    message = `错误：Cookie已被封禁或失效，请更换Cookie。\\n\\n详细信息：${errorStr}`;
     shouldRemoveCookie = true;
   } else if (errorStr.includes('suspicious activity checks')) {
     logger.error('检测到IP黑名单:', originalAuthToken);
-    message = `错误：IP可能被列入黑名单，请尝试更换网络环境或使用代理。\n\n详细信息：${errorStr}`;
+    message = `错误：IP可能被列入黑名单，请尝试更换网络环境或使用代理。\\n\\n详细信息：${errorStr}`;
     shouldRemoveCookie = false;
   } else if (errorStr.includes('Too many computers')) {
     logger.error('检测到账户暂时被封禁:', originalAuthToken);
-    message = `错误：账户因在多台设备登录而暂时被封禁，请稍后再试或更换账户。\n\n详细信息：${errorStr}`;
+    message = `错误：账户因在多台设备登录而暂时被封禁，请稍后再试或更换账户。\\n\\n详细信息：${errorStr}`;
     shouldRemoveCookie = true;
   } else if (errorStr.includes('Login expired') || errorStr.includes('login expired')) {
     logger.error('检测到登录过期cookie:', originalAuthToken);
-    message = `错误：Cookie登录已过期，请更新Cookie。\n\n详细信息：${errorStr}`;
+    message = `错误：Cookie登录已过期，请更新Cookie。\\n\\n详细信息：${errorStr}`;
     shouldRemoveCookie = true;
   } else if(errorStr.includes('your request has been blocked due to the use of a temporary email service for this account')) {
     logger.error('检测到临时邮箱:', originalAuthToken);
-    message = `错误：请求被阻止，检测到临时邮箱服务，请更换邮箱。\n\n详细信息：${errorStr}`;
+    message = `错误：请求被阻止，检测到临时邮箱服务，请更换邮箱。\\n\\n详细信息：${errorStr}`;
     shouldRemoveCookie = true;
   } else if (errorStr.includes('Your request has been blocked as our system has detected suspicious activity from your account')) {
     logger.error('检测到账户异常:', originalAuthToken);
-    message = `错误：请求被阻止，可能是假ban，多重试几次/更换cookie/更换设备。\n\n详细信息：${errorStr}`;
+    message = `错误：请求被阻止，可能是假ban，多重试几次/更换cookie/更换设备。\\n\\n详细信息：${errorStr}`;
     shouldRemoveCookie = false;
   } else {
     // 非Cookie相关错误
     logger.error('检测到其他错误:', errorStr);
-    message = `错误：请求失败。\n\n详细信息：${errorStr}`;
+    message = `错误：请求失败。\\n\\n详细信息：${errorStr}`;
     shouldRemoveCookie = false;
   }
   

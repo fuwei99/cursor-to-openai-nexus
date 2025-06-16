@@ -99,7 +99,6 @@ function chunkToUtf8String(chunk) {
   const thinkingResults = []
   const contentResults = []
   const errorResults = { hasError: false, errorMessage: '' }
-  let isThinking = false;
   const buffer = Buffer.from(chunk, 'hex');
   //console.log("Chunk buffer:", buffer.toString('hex'))
 
@@ -117,7 +116,6 @@ function chunkToUtf8String(chunk) {
         if (thinking !== undefined && thinking.length > 0){
             thinkingResults.push(thinking);
             // console.log('[DEBUG] 收到 thinking:', thinking);
-            isThinking = true;
         }
         const content = response?.message?.content
         if (content !== undefined && content.length > 0){
@@ -160,8 +158,7 @@ function chunkToUtf8String(chunk) {
 
   // 分别返回thinking和content内容
   return {
-    isThink: isThinking, 
-    thinkingContent: thinkingResults.join(''),
+    reasoning_content: thinkingResults.join(''),
     content: contentResults.join('')
   };
 }
