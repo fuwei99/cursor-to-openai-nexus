@@ -784,8 +784,7 @@ ${randomTag.replace('<', '</')}
             logger.error('解析响应块失败:', error);
             // 提供默认的空结果，避免后续处理出错
             result = {
-              isThink: false,
-              thinkingContent: '',
+              reasoning_content: '',
               content: '',
               error: `解析错误: ${error.message}`
             };
@@ -834,9 +833,9 @@ ${randomTag.replace('<', '</')}
           }
 
           // 处理thinking内容
-          if (result.isThink && result.thinkingContent && result.thinkingContent.length > 0) {
+          if (result.reasoning_content && result.reasoning_content.length > 0) {
             // 累积thinking内容
-            accumulatedThinking += result.thinkingContent;
+            accumulatedThinking += result.reasoning_content;
 
             // 如果没有发送thinking开始标记，则发送
             if (!hasWrittenThinkingStart) {
@@ -870,7 +869,7 @@ ${randomTag.replace('<', '</')}
                   {
                     index: 0,
                     delta: {
-                      content: result.thinkingContent,
+                      content: result.reasoning_content,
                     },
                   },
                 ],
@@ -1079,7 +1078,7 @@ ${randomTag.replace('<', '</')}
             logger.error('非流式响应解析块失败:', error);
             // 提供默认的空结果，避免后续处理出错
             result = {
-              thinkingContent: '',
+              reasoning_content: '',
               content: '',
               error: `解析错误: ${error.message}`
             };
@@ -1136,8 +1135,8 @@ ${randomTag.replace('<', '</')}
           }
 
           // 处理thinking内容
-          if (result.thinkingContent && result.thinkingContent.length > 0) {
-            thinkingText += result.thinkingContent;
+          if (result.reasoning_content && result.reasoning_content.length > 0) {
+            thinkingText += result.reasoning_content;
             hasThinking = true;
           }
 
