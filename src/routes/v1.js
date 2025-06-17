@@ -480,7 +480,13 @@ ${randomTag.replace('<', '</')}
 
       if (match && match[1] && !foundStopStringPattern) {
         // 只处理找到的第一个匹配
-        const stopStrings = match[1].split('::').map(s => s.trim()).filter(s => s.length > 0);
+        const rawStopString = match[1];
+        let stopStrings;
+        if (rawStopString.includes('::')) {
+          stopStrings = rawStopString.split('::').map(s => s.trim()).filter(s => s.length > 0);
+        } else {
+          stopStrings = rawStopString.split(',').map(s => s.trim()).filter(s => s.length > 0);
+        }
         extractedStopTokens = stopStrings;
         foundStopStringPattern = true;
 
